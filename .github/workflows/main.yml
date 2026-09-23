@@ -1,37 +1,71 @@
-name: RDP
+name: RDP with Tailscale
+
 on:
-workflow_dispatch:
+  workflow_dispatch:
+
 jobs:
-secure-rdp:
-runs-on: windows-latest
-timeout-minutes: 3600
-steps:
-- name: Configure Core RDP Settings
-run: |
-# Enable Remote Desktop and disable Network Level Authentication (if needed)
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
--Name "fDenyTSConnections" -Value 0 -Force
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal
-Server\WinStations\RDP-Tcp' `
--Name "UserAuthentication" -Value 0 -Force
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal
-Server\WinStations\RDP-Tcp' `
--Name "SecurityLayer" -Value 0 -Force
-# Remove any existing rule with the same name to avoid duplication
-netsh advfirewall firewall delete rule name="RDP-Tailscale"
-# For testing, allow any incoming connection on port 3389
-netsh advfirewall firewall add rule name="RDP-Tailscale" `
-dir=in action=allow protocol=TCP localport=3389
-# (Optional) Restart the Remote Desktop service to ensure changes take effect
-Restart-Service -Name TermService -Force
-- name: Create RDP User with Secure Password
-run: |
-Add-Type -AssemblyName System.Security
-$charSet = @{
-Upper = [char[]](65..90) # A-Z
-Lower = [char[]](97..122) # a-z
-Number = [char[]](48..57) # 0-9
-Special = ([char[]](33..47) + [char[]](58..64) +
-[char[]](91..96) + [char[]](123..126)) # Special characters
-}
-$rawPassword = @()
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 9999
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v2
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Configure Core RDP Settings
+        run: |
+          # Enable Remote Desktop and Disable Network Level Authentication
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          # Configure Firewall for RDP over Tailscale interface
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+          # Restart Remote Desktop Service to apply changes
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User Account
+        run: |
+          $Username = "runneruser"
+          $Password = ConvertTo-SecureString "P@ssw0rd2026!RDP" -AsPlainText -Force
+          
+          # Create local user if it doesn't exist
+          if (-not (Get-LocalUser -Name $Username -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $Username -Password $Password -FullName "RDP Admin" -Description "Tailscale RDP Admin User"
+          } else {
+              Set-LocalUser -Name $Username -Password $Password
+          }
+
+          # Add user to Administrators and Remote Desktop Users groups
+          Add-LocalGroupMember -Group "Administrators" -Member $Username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $Username -ErrorAction SilentlyContinue
+
+      - name: Display Connection Info
+        run: |
+          Write-Host "=========================================="
+          Write-Host "Tailscale RDP Server is Ready!"
+          Write-Host "Connect using your Tailscale IP on port 3389"
+          Write-Host "Username: runneruser"
+          Write-Host "Password: P@ssw0rd2026!RDP"
+          Write-Host "=========================================="
+
+      - name: Keep Alive Loop
+        run: |
+          # Prevent runner from shutting down early
+          $timeout = 21600 # 6 hours max run time limit
+          $interval = 300
+          $elapsed = 0
+          while ($elapsed -lt $timeout) {
+              Start-Sleep -Seconds $interval
+              $elapsed += $interval
+              Write-Host "RDP session active... ($elapsed / $timeout seconds)"
+          }
